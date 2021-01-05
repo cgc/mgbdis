@@ -237,6 +237,7 @@ class Bank:
 
     def resolve_blocks(self):
         blocks = self.symbols.get_blocks(self.bank_number, self.size)
+        comments = self.symbols.get_comments(self.bank_number)
         block_start_addresses = sorted(blocks.keys())
         resolved_blocks = dict()
 
@@ -259,6 +260,7 @@ class Bank:
                 'type': block['type'],
                 'length': end_address - start_address,
                 'arguments': block['arguments'],
+                'comments': comments,
             }
 
             if next_start_address is None and (end_address != self.memory_base_address + self.size):
@@ -266,7 +268,8 @@ class Bank:
                 resolved_blocks[end_address] = {
                     'type': 'code',
                     'length': (self.memory_base_address + self.size) - end_address,
-                    'arguments': None
+                    'arguments': None,
+                    'comments': comments,
                 }
 
             if next_start_address is not None and end_address < next_start_address:
@@ -274,7 +277,8 @@ class Bank:
                 resolved_blocks[end_address] = {
                     'type': 'code',
                     'length': next_start_address - end_address,
-                    'arguments': None
+                    'arguments': None,
+                    'comments': comments,
                 }
 
         self.blocks = resolved_blocks
@@ -378,6 +382,10 @@ class Bank:
         return self.format_instruction(self.style['db'], data)
 
 
+    def format_comments(self, comments):
+        return '\n'.join(comments)
+
+
     def append_output(self, text):
         self.output.append(text)
 
@@ -412,27 +420,26 @@ class Bank:
             start_address = block_start_addresses[index]
             block = self.blocks[start_address]
             end_address = start_address + block['length']
-            self.disassemble_block_range[block['type']](rom, self.rom_base_address + start_address, self.rom_base_address + end_address, block['arguments'])
+            self.disassemble_block_range[block['type']](rom, self.rom_base_address + start_address, self.rom_base_address + end_address, block['arguments'], block['comments'])
             self.append_empty_line_if_none_already()
 
         return '\n'.join(self.output)
 
 
-    def process_code_in_range(self, rom, start_address, end_address, arguments = None):
+    def process_code_in_range(self, rom, start_address, end_address, arguments = None, comments = None):
         if not self.first_pass and debug:
             print('Disassembling code in range: {} - {}'.format(hex_word(start_address), hex_word(end_address)))
 
         self.pc = start_address
         while self.pc < end_address:
-            instruction = self.disassemble_at_pc(rom, end_address)
+            instruction = self.disassemble_at_pc(rom, end_address, comments)
 
 
-    def disassemble_at_pc(self, rom, end_address):
+    def disassemble_at_pc(self, rom, end_address, comments):
         pc = self.pc
         pc_mem_address = rom_address_to_mem_address(pc)
         length = 1
         opcode = rom.data[pc]
-        comment = None
         operands = None
         operand_values = list()
 
@@ -545,7 +552,7 @@ class Bank:
                 value = rom_address_to_mem_address(rom_address)
 
                 # is the jump target is in this bank?
-                if (rom_address >= self.rom_base_address + self.memory_base_address and 
+                if (rom_address >= self.rom_base_address + self.memory_base_address and
                     rom_address < self.rom_base_address + self.memory_base_address + self.size):
                     # yep!
                     pass
@@ -616,8 +623,10 @@ class Bank:
             if len(labels):
                 self.append_labels_to_output(labels)
 
-            if comment is not None:
-                self.append_output(comment)
+            for offset in range(length):
+                address = pc_mem_address + offset
+                if address in comments:
+                    self.append_output(self.format_comments(comments[address]))
 
             instruction_bytes = rom.data[pc:pc + length]
             self.append_output(self.format_instruction(instruction_name, operand_values, pc_mem_address, instruction_bytes))
@@ -637,7 +646,7 @@ class Bank:
                     self.append_output('')
 
 
-    def process_data_in_range(self, rom, start_address, end_address, arguments = None):
+    def process_data_in_range(self, rom, start_address, end_address, arguments = None, comments = None):
         if not self.first_pass and debug:
             print('Outputting data in range: {} - {}'.format(hex_word(start_address), hex_word(end_address)))
 
@@ -655,6 +664,9 @@ class Bank:
 
                 self.append_labels_to_output(labels)
 
+            if comments and address in comments:
+                self.append_output(self.format_comments(comments[address]))
+
             values.append(hex_byte(rom.data[address]))
 
             # output max of 16 bytes per line, and ensure any remaining values are output
@@ -663,7 +675,7 @@ class Bank:
                 values = list()
 
 
-    def process_text_in_range(self, rom, start_address, end_address, arguments = None):
+    def process_text_in_range(self, rom, start_address, end_address, arguments = None, comments = None):
         if not self.first_pass and debug:
             print('Outputting text in range: {} - {}'.format(hex_word(start_address), hex_word(end_address)))
 
@@ -686,6 +698,9 @@ class Bank:
 
                 self.append_labels_to_output(labels)
 
+            if comments and address in comments:
+                self.append_output(self.format_comments(comments[address]))
+
             byte = rom.data[address]
             if byte >= 0x20 and byte < 0x7F:
                 text += chr(byte)
@@ -701,12 +716,15 @@ class Bank:
         if len(values):
             self.append_output(self.format_data(values))
 
-    def process_image_in_range(self, rom, start_address, end_address, arguments = None):
+    def process_image_in_range(self, rom, start_address, end_address, arguments = None, comments = None):
         if not self.first_pass and debug:
             print('Outputting image in range: {} - {}'.format(hex_word(start_address), hex_word(end_address)))
 
         if self.first_pass:
             return
+
+        if comments and start_address in comments:
+            self.append_output(self.format_comments(comments[start_address]))
 
         mem_address = rom_address_to_mem_address(start_address)
         labels = self.get_labels_for_non_code_address(mem_address)
@@ -727,17 +745,49 @@ class Symbols:
         self.symbols = dict()
         self.blocks = dict()
         self.bank_size = bank_size
+        self.comments = dict()
 
     def load_sym_file(self, symbols_path):
         f = open(symbols_path, 'r')
 
         for line in f:
-            # ignore comments and empty lines
-            if line[0] != ';' and len(line.strip()):
+            if line[:3] == ';; ':
+                self.add_comment(line)
+            # ignore normal comments and empty lines
+            elif line[0] != ';' and len(line.strip()):
                 self.add_symbol_definition(line)
 
         f.close()
 
+    def add_comment(self, comment):
+        split_comment = comment.split(maxsplit=2)[1:]
+        if len(split_comment) != 2:
+            return
+
+        location, body = split_comment
+        try:
+            bank, address = location.split(':')
+            bank = int(bank, 16)
+            address = int(address, 16)
+        except:
+            # Ignore comments that don't have a location
+            return
+
+        if body[-1] == '\n':
+            body = body[:-1]
+
+        if not len(body):
+            # Assume this is a blank comment for formatting
+            # Don't include whitespace at the end of the line
+            body = ';'
+        else:
+            body = '; {}'.format(body)
+
+        bank_comments = self.get_comments(bank)
+        if address not in bank_comments:
+            bank_comments[address] = []
+
+        bank_comments[address].append(body)
 
     def add_symbol_definition(self, symbol_def):
         try:
@@ -824,6 +874,11 @@ class Symbols:
             self.add_block(bank, memory_base_address, 'code', self.bank_size)
 
         return self.blocks[bank]
+
+    def get_comments(self, bank):
+        if bank not in self.comments:
+            self.comments[bank] = dict()
+        return self.comments[bank]
 
 class ROM:
 
