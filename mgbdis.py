@@ -664,8 +664,8 @@ class Bank:
 
                 self.append_labels_to_output(labels)
 
-            if comments and address in comments:
-                self.append_output(self.format_comments(comments[address]))
+            if comments and mem_address in comments:
+                self.append_output(self.format_comments(comments[mem_address]))
 
             values.append(hex_byte(rom.data[address]))
 
