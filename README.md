@@ -135,6 +135,16 @@ Check_Health:
     ...
 ```
 
+### Charmap
+
+Charmap entries can be specified as follows, which is the [rgbds format](https://rgbds.gbdev.io/docs/v0.4.1/rgbasm.5/#Character_maps). Special symbols (like `<LF>`) are not reliably supported.
+
+```
+;; CHARMAP "A", 36
+;; CHARMAP "B", 37
+;; CHARMAP "C", 38
+```
+
 ## Notes
 
 - For constant expressions, RGBDS will by default optimise instructions like ```LD [$FF40],a``` to ```LDH [$FF00+40],a```, so these are encoded as data bytes using a macro to ensure exact reproduction of the original ROM (thanks to ISSOtm). RGBDS >= v0.3.7 has an option to disable this optimisation. Use ```--disable-auto-ldh``` with mgbdis to disable the macro.

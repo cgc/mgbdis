@@ -762,6 +762,16 @@ class Bank:
         values = list()
         text = ''
 
+        charmap_value_to_str = {
+            value: s
+            for (s, value, _) in rom.symbols.charmap
+        }
+
+        if len(charmap_value_to_str):
+            text_mapping = lambda b: charmap_value_to_str.get(b)
+        else:
+            text_mapping = lambda b: chr(b) if byte >= 0x20 and byte < 0x7F else None
+
         for address in range(start_address, end_address):
             mem_address = rom_address_to_mem_address(address)
 
@@ -782,8 +792,9 @@ class Bank:
                 self.append_output(self.format_comments(comments[address]))
 
             byte = rom.data[address]
-            if byte >= 0x20 and byte < 0x7F:
-                text += chr(byte)
+            t = text_mapping(byte)
+            if t is not None:
+                text += t
             else:
                 if len(text):
                     values.append('"{}"'.format(text))
@@ -826,12 +837,15 @@ class Symbols:
         self.blocks = dict()
         self.bank_size = bank_size
         self.comments = dict()
+        self.charmap = []
 
     def load_sym_file(self, symbols_path):
         f = open(symbols_path, 'r')
 
         for line in f:
-            if line[:3] == ';; ':
+            if line.startswith(';; CHARMAP'):
+                self.add_charmap_entry(line)
+            elif line[:3] == ';; ':
                 self.add_comment(line)
             # ignore normal comments and empty lines
             elif line[0] != ';' and len(line.strip()):
@@ -868,6 +882,23 @@ class Symbols:
             bank_comments[address] = []
 
         bank_comments[address].append(body)
+
+    CHARMAP_RE = re.compile(r';;\s+(CHARMAP\s+"(.*?)",\s+(\d+))$')
+    def add_charmap_entry(self, line):
+        m = Symbols.CHARMAP_RE.match(line)
+        if not m:
+            print("Ignored invalid charmap entry: {}\n".format(line))
+            return
+        command, string, value = m.groups()
+        value = int(value)
+        if any(string == s for s, _, _ in self.charmap):
+            print("String found twice, so ignored charmap entry: {}\n".format(line))
+            return
+        self.charmap.append((
+            string,
+            value,
+            command,
+        ))
 
     def add_symbol_definition(self, symbol_def):
         try:
@@ -1170,6 +1201,10 @@ class ROM:
 ENDM
 
 """)
+
+        if self.symbols.charmap:
+            for _, _, command in self.symbols.charmap:
+                f.write(command + '\n')
 
         if self.macros.macro_file:
             f.write('INCLUDE "macros.asm"\n')
