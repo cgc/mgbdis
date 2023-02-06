@@ -701,7 +701,38 @@ class Bank:
         if not self.first_pass and debug:
             print('Outputting data in range: {} - {}'.format(hex_word(start_address), hex_word(end_address)))
 
+        if arguments == 'rept0':
+            byte_len = end_address - start_address
+            assert b'\x00' * byte_len == rom.data[start_address:end_address]
+            mem_address = rom_address_to_mem_address(start_address)
+
+            labels = self.get_labels_for_non_code_address(mem_address)
+            if len(labels):
+                self.append_labels_to_output(labels)
+            if comments and mem_address in comments:
+                self.append_output(self.format_comments(comments[mem_address]))
+            self.append_output(f'REPT {byte_len}')
+            self.append_output(f'db 0')
+            self.append_output(f'ENDR')
+            return
+
+        max_bytes_per_line = int(arguments) if arguments else 16
+
         values = list()
+
+        def output():
+            nonlocal values
+            if len(values) == max_bytes_per_line == 2:
+                # Special case for 2-wide.
+                addr = int.from_bytes(values, 'little')
+                label = self.get_label_for_instruction_operand(addr)
+                if not isinstance(label, str):
+                    label = hex_word(addr)
+                o = self.format_instruction('dw', [label])
+            else:
+                o = self.format_data(list(map(hex_byte, values)))
+            self.append_output(o)
+            values = list()
 
         for address in range(start_address, end_address):
             mem_address = rom_address_to_mem_address(address)
@@ -710,20 +741,18 @@ class Bank:
             if len(labels):
                 # add any existing values to the output and reset the list
                 if len(values) > 0:
-                    self.append_output(self.format_data(values))
-                    values = list()
+                    output()
 
                 self.append_labels_to_output(labels)
 
             if comments and mem_address in comments:
                 self.append_output(self.format_comments(comments[mem_address]))
 
-            values.append(hex_byte(rom.data[address]))
+            values.append(rom.data[address])
 
             # output max of 16 bytes per line, and ensure any remaining values are output
-            if len(values) == 16 or (address == end_address - 1 and len(values)):
-                self.append_output(self.format_data(values))
-                values = list()
+            if len(values) == max_bytes_per_line or (address == end_address - 1 and len(values)):
+                output()
 
 
     def process_text_in_range(self, rom, start_address, end_address, arguments = None, comments = None):
