@@ -13,6 +13,7 @@ import glob
 import hashlib
 import os
 import png
+import re
 from shutil import copyfile
 
 from instruction_set import instructions, cb_instructions, instruction_variants
@@ -192,9 +193,58 @@ def apply_style_to_instructions(style, instructions):
     return instructions
 
 
+class Macros:
+    def __init__(self, macro_file=None):
+        self.macro_file = macro_file
+        self.macro_map = {}
+        if macro_file:
+            self.parse_macros(macro_file)
+
+    def parse_macros(self, macro_file):
+        with open(macro_file) as f:
+            entries = re.findall(
+                r'(\w+):\s+MACRO\s+(.*?)\s+ENDM',
+                f.read(),
+                re.MULTILINE|re.DOTALL)
+
+        for macro_name, code in entries:
+            code = r'\s+'.join([
+                (
+                    # Escaping here seems ideal to avoid issues with below replacements
+                    # re.escape(l.strip()) +
+                    # HACK we simply escape '$' since it otherwise breaks
+                    l.strip().replace('$', r'\$') +
+                    # Trailing, optional expression handles case of print_hex style.
+                    # doing [^\n]*? instead of .*? to avoid backtracking
+                    r'(?:\s+;[^\n]*?$)?'
+                )
+                for l in code.split('\n')
+            ])
+            for i in range(1, 10): # rgbds does \1 through \9
+                name = f'var{i}'
+                # we replace first reference with named group
+                code = code.replace(rf'\{i}', rf'(?P<{name}>[a-zA-Z0-9\$\[\]]*)', 1)
+                # then replace all others to match
+                code = code.replace(rf'\{i}', rf'(?P={name})')
+            self.macro_map[macro_name] = re.compile(code, re.DOTALL|re.MULTILINE)
+
+    def rewrite_using_macros(self, code):
+        for macro_name, regex in self.macro_map.items():
+            code = regex.sub(
+                lambda m: macro_name + ' ' + ', '.join([
+                    # A bit of a hack, but sorting makes it simple to get
+                    # an ordered list of arguments.
+                    v for k, v in sorted(m.groupdict().items())
+                ]) if m.groupdict()
+                # Special case for no arguments to handle space.
+                else macro_name,
+                code)
+        return code
+
+
 class Bank:
 
-    def __init__(self, number, symbols, style, bank0, size):
+    def __init__(self, number, symbols, style, bank0, size, macros):
         self.style = style
         self.bank_number = number
         self.blocks = dict()
@@ -202,6 +252,7 @@ class Bank:
         self.symbols = symbols
         self.size = size
         self.bank0 = bank0
+        self.macros = macros
 
         if number == 0:
             self.memory_base_address = 0
@@ -423,7 +474,7 @@ class Bank:
             self.disassemble_block_range[block['type']](rom, self.rom_base_address + start_address, self.rom_base_address + end_address, block['arguments'], block['comments'])
             self.append_empty_line_if_none_already()
 
-        return '\n'.join(self.output)
+        return self.macros.rewrite_using_macros('\n'.join(self.output))
 
 
     def process_code_in_range(self, rom, start_address, end_address, arguments = None, comments = None):
@@ -865,6 +916,15 @@ class Symbols:
 
         return None
 
+    def get_labeled_constants(self):
+        return {
+            address: label
+            # Choosing Bank 0 since that's where labels for non-banked
+            # addresses are stored.
+            for address, label in self.symbols[0].items()
+            if address >= 0x8000
+        }
+
     def get_blocks(self, bank, size):
         memory_base_address = 0x0000 if bank == 0 else 0x4000
 
@@ -882,7 +942,7 @@ class Symbols:
 
 class ROM:
 
-    def __init__(self, rom_path, style, tiny):
+    def __init__(self, rom_path, style, tiny, macro_path):
         self.style = style
         self.script_dir = os.path.dirname(os.path.realpath(__file__))
         self.rom_path = rom_path
@@ -897,6 +957,7 @@ class ROM:
         print('ROM MD5 hash:', hashlib.md5(self.data).hexdigest())
 
         self.symbols = self.load_symbols()
+        self.macros = Macros(macro_path)
 
         # add some bytes to avoid an index out of range error
         # when processing last few instructions in the rom
@@ -904,12 +965,12 @@ class ROM:
 
         size = self.rom_size
         if tiny:
-            self.banks = [Bank(0, self.symbols, style, None, min(size, 0x8000))]
+            self.banks = [Bank(0, self.symbols, style, None, min(size, 0x8000), self.macros)]
         else:
-            self.banks = [Bank(0, self.symbols, style, None, min(size, 0x4000))]
+            self.banks = [Bank(0, self.symbols, style, None, min(size, 0x4000), self.macros)]
             for bank in range(1, self.num_banks):
                 size -= 0x4000
-                self.banks.append(Bank(bank, self.symbols, style, self.banks[0], min(size, 0x4000)))
+                self.banks.append(Bank(bank, self.symbols, style, self.banks[0], min(size, 0x4000), self.macros))
 
     def load(self, tiny):
         if os.path.isfile(self.rom_path):
@@ -1003,6 +1064,8 @@ class ROM:
             self.write_bank_asm(bank)
 
         self.copy_hardware_inc()
+        self.write_constants_asm()
+        self.copy_macros_asm()
         self.write_game_asm()
         self.write_makefile()
 
@@ -1041,6 +1104,19 @@ class ROM:
         copyfile(src, dest)
 
 
+    def write_constants_asm(self):
+        path = os.path.join(self.output_directory, 'constants.asm')
+        with open(path, 'w') as f:
+            for address, constant in self.symbols.get_labeled_constants().items():
+                f.write(f'{constant} EQU ${address:04x}\n')
+
+
+    def copy_macros_asm(self):
+        if self.macros.macro_file:
+            dest = os.path.join(self.output_directory, 'macros.asm')
+            copyfile(self.macros.macro_file, dest)
+
+
     def write_game_asm(self):
         path = os.path.join(self.output_directory, 'game.asm')
         f = open(path, 'w')
@@ -1066,6 +1142,10 @@ ENDM
 
 """)
 
+        if self.macros.macro_file:
+            f.write('INCLUDE "macros.asm"\n')
+
+        f.write('INCLUDE "constants.asm"\n')
         f.write('INCLUDE "hardware.inc"')
         for bank in range(0, self.num_banks):
             f.write('\nINCLUDE "bank_{0:03x}.asm"'.format(bank))
@@ -1253,6 +1333,7 @@ parser.add_argument('--disable-auto-ldh', help='Disable RGBDS\'s automatic optim
 parser.add_argument('--overwrite', help='Allow generating a disassembly into an already existing directory', action='store_true')
 parser.add_argument('--debug', help='Display debug output', action='store_true')
 parser.add_argument('--tiny', help='Emulate RGBLINK `-t` option (non-banked / "32k" ROMs)', action='store_true')
+parser.add_argument('--macro-path', help='Path to asm file with macro definitions.', action='store')
 args = parser.parse_args()
 
 debug = args.debug
@@ -1271,5 +1352,5 @@ style = {
 }
 instructions = apply_style_to_instructions(style, instructions)
 
-rom = ROM(args.rom_path, style, args.tiny)
+rom = ROM(args.rom_path, style, args.tiny, args.macro_path)
 rom.disassemble(args.output_dir)
